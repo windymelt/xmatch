@@ -1,0 +1,110 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+(progn ;;init forms
+  (ros:ensure-asdf)
+  #+quicklisp(ql:quickload '(:alexandria :trivia :trivia.ppcre :cxml :flexi-streams :iterate) :silent t)
+  )
+
+(defpackage :ros.script.xmatch.3812454812
+  (:use :cl :iter :trivia :trivia.ppcre))
+(in-package :ros.script.xmatch.3812454812)
+
+(defun without-empty-string (lis)
+  (remove-if #'(lambda (sth)
+                 (if (stringp sth)
+                     (string= "" sth)
+                     nil))
+                 lis))
+
+(defun without-dtd (node-info)
+  (if (listp node-info) ;; usually node-info is like "p", but it can be ("p" . "...") 
+      (car node-info)
+      node-info))
+
+(defun sanitize-sxml (sxml)
+  "Returns sxml without space/cr/lf-only text node."
+  (or
+   (match sxml
+    ((guard sth (null sth)) nil)
+    ((ppcre "^\\s+$") "")
+    ((guard str (stringp str)) str)
+    ((list* node-info attrs children)
+      `(,(without-dtd node-info) ,attrs
+            ,@(without-empty-string(iter (for c :in children)
+                  (collecting (sanitize-sxml c))))))
+    ((list* root) (iter (for c :in root)
+                        (collecting (sanitize-sxml c)))))
+      sxml))
+
+(defun traverse (f sth &key (aroundfunc #'identity))
+  (match sth
+    ((guard lis (alexandria:proper-list-p sth))
+     (funcall aroundfunc
+              (mapcar #'(lambda (%sth)
+                          (traverse f %sth :aroundfunc aroundfunc))
+                      lis)))
+    (otherwise (funcall f sth))))
+
+(defun list->constructor (lis)
+  (traverse #'identity lis :aroundfunc #'(lambda (lis) (cons 'list lis))))
+
+(defun do-match (src pattern)
+  (let ((form `(let ((%src '(,@src)))
+           (match %src
+          (,(list->constructor pattern)
+           (warn "found")
+           (output-variables ,(cons 'list (pattern->variables pattern)))
+           "found")))))
+    (eval form)))
+
+(defun pattern->variables (pattern)
+  (let ((vars '()))
+    (traverse #'(lambda (sth) (when (symbolp sth) (push sth vars))) pattern)
+    vars))
+
+(defun output-variables (vars) (format t "VARS: ~S~%" vars))
+
+(defun punchhole-pattern (pattern)
+  (traverse #'identity
+            pattern
+            :aroundfunc #'(lambda (lis)
+                            (or (match lis 
+                                   ((list "string" (list (list "var" var)))
+                                    (make-symbol (string-upcase var))))
+                                lis))))
+
+(defun parse-opts (argv &key
+                        (pattern-file nil)
+                        (source-file nil))
+  (match argv
+           ((list* "-e" file rest)
+            (setf pattern-file file)
+            (parse-opts rest
+                        :pattern-file pattern-file
+                        :source-file source-file))
+           ((list file)
+            (setf source-file file)
+            (list :pattern-file pattern-file
+                  :source-file source-file))
+           ((list* other) (error "Unrecognized command option: ~S~%" other))))
+
+(defun main (&rest argv)
+  (declare (ignorable argv))
+  (let* ((params (parse-opts argv))
+         (source-file-path (pathname (getf params :source-file)))
+         (pattern-file-path (pathname (getf params :pattern-file)))
+         (src
+          (cxml:parse-file source-file-path (cxml-xmls:make-xmls-builder)))
+         (pattern
+          (cxml:parse-file pattern-file-path (cxml-xmls:make-xmls-builder)))
+         (sanitized-pattern (caddr (punchhole-pattern (sanitize-sxml pattern))))
+  
+    )
+     (traverse
+     #'identity
+     (sanitize-sxml src)
+     :aroundfunc #'(lambda (lis) (do-match lis sanitized-pattern) lis))))
+;;; vim: set ft=lisp lisp:
